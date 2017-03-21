@@ -1,3 +1,9 @@
+############################################################
+##           daddy88/shopify-serverless-aws-app
+##      A generic serverless embedded Shopify web app      
+##     utilizing the Shopify EASDK and OAuth. "Hosted"     
+##   on AWS Lambda, Simple Storage Service and API Gateway.
+############################################################
 
 from __future__ import print_function
 import boto3
@@ -11,6 +17,7 @@ import urlparse
 print('Loading function')
 
 bucket_name = 'S3_BUCKET_NAME'
+file_name = 'app-ui.html'
 app_key = 'APP_API_KEY'
 app_secret = 'APP_SECRET_HASH'
 app_url = 'THE_URL_OF_YOUR_API_GATEWAY_ENDPOINT_OF_THIS_FILE' # eg. https://d4w5a64d.execute-api.eu-east-1.amazonaws.com/stage
@@ -58,7 +65,7 @@ def lambda_handler(event, context):
 
             if digest == event['queryStringParameters']['hmac']: 
                 # if the digest equals the hmac recived from Shopify = valid request
-                return respond_html(200, get_s3('index.html').replace('{{APIKEY}}', app_key).replace('{{SHOP}}', 'https://'+event['queryStringParameters']['shop']))
+                return respond_html(200, get_s3(file_name).replace('{{APIKEY}}', app_key).replace('{{SHOP}}', 'https://'+event['queryStringParameters']['shop']))
             else: 
                 # the request has been spoofed
                 return respond_html(500, 'Sorry your not authenticated.')
