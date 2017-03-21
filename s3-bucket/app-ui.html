@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <script src="https://cdn.shopify.com/s/assets/external/app.js"></script>
+        <script type="text/javascript">
+            ShopifyApp.init({
+            apiKey: '{{APIKEY}}',
+            shopOrigin: '{{SHOP}}'
+            });
+        </script>
+        <script   src="https://code.jquery.com/jquery-3.2.0.min.js"   integrity="sha256-JAW99MJVpJBGcbzEuXk4Az05s/XyDdBomFqNlM3ic+I="   crossorigin="anonymous"></script>
+    </head>
+<body>
+
+<center>
+<h1>Hello World</h1>
+<p>This is the content of your Embedded Shopify Web App.</p>
+</center>
+
+
+<script type="text/javascript">
+  ShopifyApp.ready(function(){
+    ShopifyApp.Bar.initialize({
+        buttons: {
+            primary: {
+            label: "Primary Button",
+            callback: function(){ alert("Method not implemented"); }
+            },
+            secondary: [
+                { label: "Secondary Button Label", callback: function(){
+                        alert("Method not implemented");
+                    }
+                }
+            ],
+        }
+        });
+  });
+</script>
+</body>
+</html>
