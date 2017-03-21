@@ -11,8 +11,11 @@ import boto3
 import sys
 import json
 import hmac
+import base64
 import hashlib
 import urlparse
+import urllib
+import urllib2
 
 print('Loading function')
 
@@ -38,6 +41,9 @@ def hmac_signature(shop_secret, payload):
     # calculates the hmac signature of the payload param, salted with the shop_secret param
     return hmac.new(shop_secret, ''.join(['%s=%s&' % (key, value) for (key, value) in sorted(payload.items())])[:-1], hashlib.sha256).hexdigest()
 
+def verify_weebhook(shop_secret, payload):
+    return hmac.new(shop_secret, payload, hashlib.sha256).hexdigest()
+
 def respond_html(statusCode, body):
     return {
                 "statusCode": statusCode,
@@ -45,6 +51,72 @@ def respond_html(statusCode, body):
                 "body": body
             }
 
+def curlRequest(data, url, method, headers={}):
+    return json.loads(urllib2.urlopen(MethodRequest(url, method=method, data=data, headers=headers)).read())
+
+class MethodRequest(urllib2.Request):
+    def __init__(self, *args, **kwargs):
+        if 'method' in kwargs:
+            self._method = kwargs['method']
+            del kwargs['method']
+        else:
+            self._method = None
+        return urllib2.Request.__init__(self, *args, **kwargs)
+
+    def get_method(self, *args, **kwargs):
+        if self._method is not None:
+            return self._method
+        return urllib2.Request.get_method(self, *args, **kwargs)
+
+class restfulShopify:
+    def __init__(self, shop_uri, shop_secret='', shop_code=''):
+        self.shop_uri = shop_uri
+        self.shop_secret = shop_secret
+
+        if shop_code != '':            
+            self.shop_secret = curlRequest(
+                urllib.urlencode(
+                {
+                    'client_id':app_key,
+                    'client_secret':app_secret,
+                    'code':shop_code
+                }),
+                'https://' + self.shop_uri + '/admin/oauth/access_token', 
+                'POST')['access_token']
+        if self.shop_secret == '':
+            raise Exception('Secret shop token is undefined.')
+
+        base64string = base64.b64encode('%s:%s' % (app_key, self.shop_secret))        
+        self.authheader = { 'Authorization': 'Basic %s' % base64string }
+        self.shop = curlRequest({}, 'https://' + self.shop_uri + '/admin/shop.json', 'GET', self.authheader)
+
+    def getObject(self, uri):
+        return curlRequest({}, 'https://' + self.shop_uri + uri, 'GET', self.authheader)
+    
+    def postObject(self, uri, data):
+        data = json.dumps(data)
+        headers = {
+            'Authorization': self.authheader['Authorization'],
+            'Content-Type': 'application/json', 
+            'Content-Length': len(data)
+            }
+        return curlRequest(data, 'https://' + self.shop_uri + uri, 'POST', headers)
+
+    def putObject(self, uri, data):
+        data = json.dumps(data)
+        headers = {
+            'Authorization': self.authheader['Authorization'],
+            'Content-Type': 'application/json', 
+            'Content-Length': len(data)
+            }
+        return curlRequest(data, 'https://' + self.shop_uri + uri, 'PUT', headers)
+
+    def deleteObject(self, uri):
+        return curlRequest({}, 'https://' + self.shop_uri + uri, 'DELETE', self.authheader)
+
+########################
+# Main lambda function
+########################
 def lambda_handler(event, context):
     sys.tracebacklimit = 0 # dont print details of exceptions
 
@@ -65,9 +137,35 @@ def lambda_handler(event, context):
 
             if digest == event['queryStringParameters']['hmac']: 
                 # if the digest equals the hmac recived from Shopify = valid request
+                if safe_list_get(event['queryStringParameters'], 'code', None) is not None:
+                    # if code is present in the request from shopify we need it to fetch the access token, to access the api.
+                    shopify = restfulShopify(shop_uri=event['queryStringParameters']['shop'], shop_code=event['queryStringParameters']['code'])
+                    if len(shopify.getObject('/admin/webhooks.json')['webhooks']) == 0:
+                        # if no webhooks are registrated, we need to registrate a webhook on app uninstall
+                        shopify.postObject('/admin/webhooks.json', {
+                            'webhook': {
+                                'topic': 'app/uninstalled',
+                                'address': app_url+'/uninstalled', # will be pointing to /uninstalled in this script
+                                'format': 'json'
+                            }
+                        })
+
                 return respond_html(200, get_s3(file_name).replace('{{APIKEY}}', app_key).replace('{{SHOP}}', 'https://'+event['queryStringParameters']['shop']))
             else: 
                 # the request has been spoofed
                 return respond_html(500, 'Sorry your not authenticated.')
+
+
+    if event['requestContext']['httpMethod'] == 'POST':
+        # if it is a POST request
+        if uri_path_proxy[0] == 'uninstalled':
+            print(json.dumps(event))
+            # we are reciving a webhook from Shopify: A merchant has uninstalled this app
+            if verify_weebhook(app_secret, event['body']) == event['headers']['HTTP_X_SHOPIFY_HMAC_SHA256']:
+                print('merchant '+event['headers']['HTTP_X_SHOPIFY_SHOP_DOMAIN']+' sadly uninstalled the app')
+                #
+                # Remove and revoke stuff as needed here, or perhaps send a winback email.
+                #
+                return respond_html(200, '')
 
     return respond_html(500, 'Sorry something went wrong.') # a catch all response
