@@ -21,11 +21,16 @@ print('Loading function')
 
 bucket_name = 'S3_BUCKET_NAME'
 file_name = 'app-ui.html'
+dynamo_table_name = 'test_app' # the dynamo table used to store merchant data
 app_key = 'APP_API_KEY'
 app_secret = 'APP_SECRET_HASH'
 app_url = 'THE_URL_OF_YOUR_API_GATEWAY_ENDPOINT_OF_THIS_FILE' # eg. https://d4w5a64d.execute-api.eu-east-1.amazonaws.com/stage
 app_scope = 'read_products' # the API access scope of your app
-dynamo_table_name = '' # the dynamo table used to store merchant data
+app_charge_name = 'Pro Plan'
+app_charge_price = 10
+app_charge_test = True
+app_charge_trail = 30
+
 
 def safe_list_get (l, idx, default):
     # checks a list, and returns the default param if idx is not defined
@@ -72,12 +77,24 @@ def get_store(shopuri):
     except:
         return None
 
+def delete_store(shopuri):
+    dynamodb = boto3.resource('dynamodb')
+    table = dynamodb.Table(dynamo_table_name)
+    try:
+        response = table.delete_item(
+            Key={
+                'shop_uri': shopuri
+            }
+        )
+    except:
+        return None
+
 def hmac_signature(shop_secret, payload):
     # calculates the hmac signature of the payload param, salted with the shop_secret param
     return hmac.new(shop_secret, ''.join(['%s=%s&' % (key, value) for (key, value) in sorted(payload.items())])[:-1], hashlib.sha256).hexdigest()
 
 def verify_weebhook(shop_secret, payload):
-    return hmac.new(shop_secret, payload, hashlib.sha256).hexdigest()
+    return base64.b64encode(hmac.new(shop_secret, payload, hashlib.sha256).digest())
 
 def respond_html(statusCode, body):
     return {
@@ -185,7 +202,6 @@ def lambda_handler(event, context):
                     else:
                         return respond_html(500, 'Sorry your not authenticated.')
 
-
                 # if no webhooks are registrated, we need to registrate a webhook on app uninstall
                 if len(shopify.getObject('/admin/webhooks.json')['webhooks']) == 0:
                     shopify.postObject('/admin/webhooks.json', {
@@ -196,6 +212,43 @@ def lambda_handler(event, context):
                         }
                     })
 
+
+                shop = get_store(event['queryStringParameters']['shop'])
+                if safe_list_get(shop, 'uninstalled', None) != None:
+                    trail = 0 # if the app has been installed before, then give no trail.
+                else:
+                    trail = app_charge_trail
+
+                activeCharge = False
+                appCharges = shopify.getObject('/admin/recurring_application_charges.json')['recurring_application_charges']
+                # if app charges has been made in the past
+                if len(appCharges) != 0:
+                    # itterate over all app charges until one is found that has the correct state
+                    for appCharge in appCharges:
+                        if appCharge['status'] == 'pending':
+                            return respond_html(200, '<script>window.top.location.href = "'+appCharge['confirmation_url']+'";</script>')
+                        if appCharge['status'] == 'accepted':
+                            shopify.postObject('/admin/recurring_application_charges/'+str(appCharge['id'])+'/activate.json', {'recurring_application_charge':appCharge})
+                            activeCharge = True
+                            break
+                        if appCharge['status'] == 'active':
+                            activeCharge = True
+                            break
+
+                #If no application charge is active, create a new request
+                if activeCharge == False: 
+                    confirmation_url = shopify.postObject('/admin/recurring_application_charges.json', {
+                        'recurring_application_charge': {
+                            'name': app_charge_name,
+                            'price': app_charge_price,
+                            'return_url': 'https://'+shopify.shop_uri+'/admin/apps/'+app_key,
+                            'test': app_charge_test, 
+                            'trial_days': trail
+                        }
+                    })['recurring_application_charge']['confirmation_url']
+                    return respond_html(200, '<script>window.top.location.href = "'+confirmation_url+'";</script>')
+
+
                 return respond_html(200, get_s3(file_name).replace('{{APIKEY}}', app_key).replace('{{SHOP}}', 'https://'+event['queryStringParameters']['shop']))
             else: 
                 # the request has been spoofed
@@ -205,13 +258,11 @@ def lambda_handler(event, context):
     if event['requestContext']['httpMethod'] == 'POST':
         # if it is a POST request
         if uri_path_proxy[0] == 'uninstalled':
-            print(json.dumps(event))
             # we are reciving a webhook from Shopify: A merchant has uninstalled this app
-            if verify_weebhook(app_secret, event['body']) == event['headers']['HTTP_X_SHOPIFY_HMAC_SHA256']:
-                print('merchant '+event['headers']['HTTP_X_SHOPIFY_SHOP_DOMAIN']+' sadly uninstalled the app')
-                #
+            if verify_weebhook(app_secret, event['body']) == event['headers']['X-Shopify-Hmac-Sha256']:
                 # Remove and revoke stuff as needed here, or perhaps send a winback email.
-                #
+                delete_store(event['headers']['X-Shopify-Shop-Domain'])
+                set_store(event['headers']['X-Shopify-Shop-Domain'], {'uninstalled':True})
                 return respond_html(200, '')
 
     return respond_html(500, 'Sorry something went wrong.') # a catch all response
