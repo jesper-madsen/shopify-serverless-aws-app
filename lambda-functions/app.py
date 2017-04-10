@@ -25,6 +25,7 @@ app_key = 'APP_API_KEY'
 app_secret = 'APP_SECRET_HASH'
 app_url = 'THE_URL_OF_YOUR_API_GATEWAY_ENDPOINT_OF_THIS_FILE' # eg. https://d4w5a64d.execute-api.eu-east-1.amazonaws.com/stage
 app_scope = 'read_products' # the API access scope of your app
+dynamo_table_name = '' # the dynamo table used to store merchant data
 
 def safe_list_get (l, idx, default):
     # checks a list, and returns the default param if idx is not defined
@@ -36,6 +37,40 @@ def safe_list_get (l, idx, default):
 def get_s3(finame):
     #returns contents of a s3 file
     return boto3.resource('s3').Bucket(bucket_name).Object(finame).get()['Body'].read()
+
+def set_store(shopuri, data):
+    dynamodb = boto3.resource('dynamodb')
+    table = dynamodb.Table(dynamo_table_name)
+
+    for data_key in data:
+        if data_key != "shopuri":
+            try:
+                response = table.update_item(
+                    Key={
+                        'shop_uri': shopuri
+                    },
+                    UpdateExpression="set "+data_key+" = :r",
+                    ExpressionAttributeValues={
+                        ':r': data[data_key]
+                    },
+                    ReturnValues="UPDATED_NEW"
+                )
+            except:
+                dummyVal = 0
+
+def get_store(shopuri):
+    try:
+        dynamodb = boto3.resource('dynamodb')
+        table = dynamodb.Table(dynamo_table_name)
+        
+        response = table.get_item(
+            Key={
+                'shop_uri': shopuri
+            }
+        )
+        return response['Item']
+    except:
+        return None
 
 def hmac_signature(shop_secret, payload):
     # calculates the hmac signature of the payload param, salted with the shop_secret param
@@ -140,15 +175,26 @@ def lambda_handler(event, context):
                 if safe_list_get(event['queryStringParameters'], 'code', None) is not None:
                     # if code is present in the request from shopify we need it to fetch the access token, to access the api.
                     shopify = restfulShopify(shop_uri=event['queryStringParameters']['shop'], shop_code=event['queryStringParameters']['code'])
-                    if len(shopify.getObject('/admin/webhooks.json')['webhooks']) == 0:
-                        # if no webhooks are registrated, we need to registrate a webhook on app uninstall
-                        shopify.postObject('/admin/webhooks.json', {
-                            'webhook': {
-                                'topic': 'app/uninstalled',
-                                'address': app_url+'/uninstalled', # will be pointing to /uninstalled in this script
-                                'format': 'json'
-                            }
-                        })
+                    set_store(event['queryStringParameters']['shop'], {'shop_secret':shopify.shop_secret})
+                else:
+                    # if code is not part of queryStringParameters
+                    # then shop configuration shall be loaded from dynamoDB 
+                    shop_secret = get_store(event['queryStringParameters']['shop'])['shop_secret']
+                    if shop_secret != None:
+                        shopify = restfulShopify(shop_uri=event['queryStringParameters']['shop'], shop_secret=shop_secret)
+                    else:
+                        return respond_html(500, 'Sorry your not authenticated.')
+
+
+                # if no webhooks are registrated, we need to registrate a webhook on app uninstall
+                if len(shopify.getObject('/admin/webhooks.json')['webhooks']) == 0:
+                    shopify.postObject('/admin/webhooks.json', {
+                        'webhook': {
+                            'topic': 'app/uninstalled',
+                            'address': app_url+'/uninstalled', # will be pointing to /uninstalled in this script
+                            'format': 'json'
+                        }
+                    })
 
                 return respond_html(200, get_s3(file_name).replace('{{APIKEY}}', app_key).replace('{{SHOP}}', 'https://'+event['queryStringParameters']['shop']))
             else: 
